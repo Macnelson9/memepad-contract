@@ -1,5 +1,6 @@
  use starknet::ContractAddress;
 
+
      /// Interface for ERC20 tokens (STRK)
      #[starknet::interface]
      trait IERC20<TContractState> {
@@ -41,6 +42,8 @@
     #[abi(embed_v0)]
     impl OwnableImpl = OwnableComponent::OwnableImpl<ContractState>;
     impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
+    const DECIMALS: u256 = 1000000000000000000; // 10^18
+
 
     #[storage]
     struct Storage {
@@ -61,6 +64,26 @@
         marketplace_fee_address: ContractAddress, // Address to receive marketplace fees
     }
 
+    fn felt252_to_byte_array(value: felt252) -> ByteArray {
+        let mut result = "";
+        let mut temp: u256 = value.into();
+        let mut i: u32 = 0;
+        while i < 32_u32 {
+            let byte: u8 = (temp % 256).try_into().unwrap();
+            if byte != 0 || result.len() > 0 {
+                result.append_byte(byte);
+            }
+            temp = temp / 256;
+            i += 1_u32;
+        };
+    
+        if result.len() == 0 {
+            result = "0";
+        }
+    
+        result
+    }
+
     #[event]
     #[derive(Drop, starknet::Event)]
     enum Event {
@@ -76,6 +99,7 @@
     struct TokensBought {
         buyer: ContractAddress,
         amount_in: u256,
+        fee_amount: u256,
         tokens_out: u256,
     }
 
@@ -83,34 +107,42 @@
     struct TokensSold {
         seller: ContractAddress,
         tokens_in: u256,
+        fee_amount: u256,
         amount_out: u256,
     }
     #[constructor]
     fn constructor(
-        ref self: ContractState,
-        name: felt252,
-        symbol: felt252,
-        initial_supply: u256,
-        curve_factor: u256,
-        owner: ContractAddress,
-        strk_contract: ContractAddress,
-        marketplace_fee_address: ContractAddress,
+    ref self: ContractState,
+    name: felt252,
+    symbol: felt252,
+    initial_supply: u256,
+    curve_factor: u256,
+    initial_deposit: u256,
+    owner: ContractAddress,
+    strk_contract: ContractAddress,
+    marketplace_fee_address: ContractAddress,
     ) {
-        self.erc20.initializer(format!("{}", name), format!("{}", symbol));
-        self.ownable.initializer(owner);
-        self.curve_factor.write(curve_factor);
-        self.total_supply.write(initial_supply);
-        self.strk_contract.write(strk_contract);
-        self.marketplace_fee_address.write(marketplace_fee_address);
-        self.erc20.mint(owner, initial_supply); // Mint initial to owner or liquidity
+    // Convert felt252 to ByteArray properly (avoiding format! issues)
+    let name_bytes = felt252_to_byte_array(name);
+    let symbol_bytes = felt252_to_byte_array(symbol);
+    
+    // Initialize ERC20 with ByteArray instead of format!
+    self.erc20.initializer(name_bytes, symbol_bytes);
+    self.ownable.initializer(owner);
+    self.curve_factor.write(curve_factor);
+    self.total_supply.write(initial_supply * DECIMALS);
+    self.liquidity_pool.write(initial_deposit);
+    self.strk_contract.write(strk_contract);
+    self.marketplace_fee_address.write(marketplace_fee_address);
+    self.erc20.mint(owner, initial_supply * DECIMALS); // Mint initial to owner or liquidity
 
         // Initialize tracking
-        if initial_supply > 0 {
-            self.holders.write(owner, true);
-            self.holder_count.write(1);
-        }
-        self.buyer_count.write(0);
-        self.seller_count.write(0);
+    if initial_supply > 0 {
+        self.holders.write(owner, true);
+        self.holder_count.write(1);
+    }
+    self.buyer_count.write(0);
+    self.seller_count.write(0);
     }
 
     #[abi(embed_v0)]
@@ -134,7 +166,7 @@
             assert(fee_success, 'Fee transfer failed');
 
             let price = self.get_current_price();
-            let tokens_out = net_amount / price;
+            let tokens_out = (net_amount / price) * DECIMALS;
             assert(tokens_out > 0, 'Insufficient output');
 
             self.erc20.mint(caller, tokens_out);
@@ -153,14 +185,22 @@
                 self.holder_count.write(self.holder_count.read() + 1);
             }
 
-            self.emit(TokensBought { buyer: caller, amount_in, tokens_out });
+            self.emit(TokensBought { buyer: caller, amount_in, fee_amount, tokens_out });
         }
 
         fn sell_tokens(ref self: ContractState, tokens_in: u256) {
             assert(tokens_in > 0, 'Tokens must be positive');
+            assert(tokens_in <= self.total_supply.read(), 'Total supply exceeded');
             let caller = get_caller_address();
             let price = self.get_current_price();
-            let gross_amount = tokens_in * price;
+
+            let tokens = tokens_in / DECIMALS;
+            if tokens != 0 {
+            let max_price = u256 { low: 0xFFFFFFFF, high: 0xFFFFFFFF } / tokens; // Approximate max
+            assert(price <= max_price, 'Price overflow');
+            }
+
+            let gross_amount = tokens * price;
             assert(gross_amount > 0, 'Insufficient output');
             assert(gross_amount <= self.liquidity_pool.read(), 'Insufficient liquidity');
 
@@ -194,11 +234,21 @@
                 self.holder_count.write(self.holder_count.read() - 1);
             }
 
-            self.emit(TokensSold { seller: caller, tokens_in, amount_out: net_amount });
+            self.emit(TokensSold { seller: caller, tokens_in, fee_amount, amount_out: net_amount });
         }
 
         fn get_current_price(self: @ContractState) -> u256 {
-            self.total_supply.read() * self.curve_factor.read()
+            // ADD SAFE MULTIPLICATION FOR PRICE CALCULATION
+            let total_supply_tokens = self.total_supply.read() / DECIMALS;
+            let curve_factor = self.curve_factor.read();
+
+            // Prevent overflow in price calculation
+            if total_supply_tokens != 0 {
+                let max_curve = u256 { low: 0xFFFFFFFF, high: 0xFFFFFFFF } / total_supply_tokens;
+                assert(curve_factor <= max_curve, 'Curve overflow');
+            }
+
+            total_supply_tokens * curve_factor
         }
 
         fn get_holder_count(self: @ContractState) -> u256 {
