@@ -1,32 +1,23 @@
- use starknet::ContractAddress;
+use starknet::ContractAddress;
 
+/// Interface for MemeCoinLaunchpad
+#[starknet::interface]
+pub trait IMemeCoinLaunchpad<TContractState> {
+    fn buy_tokens(ref self: TContractState, amount_in: u256);
+    fn sell_tokens(ref self: TContractState, tokens_in: u256);
+    fn get_current_price(self: @TContractState) -> u256;
+    fn get_holder_count(self: @TContractState) -> u256;
+    fn get_buyer_count(self: @TContractState) -> u256;
+    fn get_seller_count(self: @TContractState) -> u256;
+    fn is_holder(self: @TContractState, address: ContractAddress) -> bool;
+    fn is_buyer(self: @TContractState, address: ContractAddress) -> bool;
+    fn is_seller(self: @TContractState, address: ContractAddress) -> bool;
+}
 
-     /// Interface for ERC20 tokens (STRK)
-     #[starknet::interface]
-     trait IERC20<TContractState> {
-         fn transfer_from(ref self: TContractState, sender: ContractAddress, recipient: ContractAddress, amount: u256) -> bool;
-         fn transfer(ref self: TContractState, recipient: ContractAddress, amount: u256) -> bool;
-     }
-
-     /// Interface for MemeCoinLaunchpad
-     #[starknet::interface]
-     pub trait IMemeCoinLaunchpad<TContractState> {
-        fn buy_tokens(ref self: TContractState, amount_in: u256);
-        fn sell_tokens(ref self: TContractState, tokens_in: u256);
-        fn get_current_price(self: @TContractState) -> u256;
-        fn get_holder_count(self: @TContractState) -> u256;
-        fn get_buyer_count(self: @TContractState) -> u256;
-        fn get_seller_count(self: @TContractState) -> u256;
-        fn is_holder(self: @TContractState, address: ContractAddress) -> bool;
-        fn is_buyer(self: @TContractState, address: ContractAddress) -> bool;
-        fn is_seller(self: @TContractState, address: ContractAddress) -> bool;
-    }
-    
-    #[starknet::contract]
-    mod MemeCoinLaunchpad {
+#[starknet::contract]
+mod MemeCoinLaunchpad {
     use super::IMemeCoinLaunchpad;
-    use super::IERC20Dispatcher;
-    use super::IERC20DispatcherTrait;
+    use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
     use openzeppelin::access::ownable::OwnableComponent;
     use openzeppelin::token::erc20::{ERC20Component, ERC20HooksEmptyImpl};
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
@@ -43,7 +34,6 @@
     impl OwnableImpl = OwnableComponent::OwnableImpl<ContractState>;
     impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
     const DECIMALS: u256 = 1000000000000000000; // 10^18
-
 
     #[storage]
     struct Storage {
@@ -65,22 +55,30 @@
     }
 
     fn felt252_to_byte_array(value: felt252) -> ByteArray {
-        let mut result = "";
+        let mut bytes = ArrayTrait::new();
         let mut temp: u256 = value.into();
         let mut i: u32 = 0;
         while i < 32_u32 {
             let byte: u8 = (temp % 256).try_into().unwrap();
-            if byte != 0 || result.len() > 0 {
-                result.append_byte(byte);
+            if byte != 0 || bytes.len() > 0 {
+                bytes.append(byte);
             }
             temp = temp / 256;
             i += 1_u32;
         };
-    
-        if result.len() == 0 {
-            result = "0";
+
+        if bytes.len() == 0 {
+            return "0";
         }
-    
+
+        // Reverse the bytes to correct endianness for string representation
+        let mut result = "";
+        let mut j = bytes.len();
+        while j > 0 {
+            j -= 1;
+            result.append_byte(*bytes.at(j));
+        };
+
         result
     }
 
@@ -110,39 +108,40 @@
         fee_amount: u256,
         amount_out: u256,
     }
+
     #[constructor]
     fn constructor(
-    ref self: ContractState,
-    name: felt252,
-    symbol: felt252,
-    initial_supply: u256,
-    curve_factor: u256,
-    initial_deposit: u256,
-    owner: ContractAddress,
-    strk_contract: ContractAddress,
-    marketplace_fee_address: ContractAddress,
+        ref self: ContractState,
+        name: felt252,
+        symbol: felt252,
+        initial_supply: u256,
+        curve_factor: u256,
+        initial_deposit: u256,
+        owner: ContractAddress,
+        strk_contract: ContractAddress,
+        marketplace_fee_address: ContractAddress,
     ) {
-    // Convert felt252 to ByteArray properly (avoiding format! issues)
-    let name_bytes = felt252_to_byte_array(name);
-    let symbol_bytes = felt252_to_byte_array(symbol);
-    
-    // Initialize ERC20 with ByteArray instead of format!
-    self.erc20.initializer(name_bytes, symbol_bytes);
-    self.ownable.initializer(owner);
-    self.curve_factor.write(curve_factor);
-    self.total_supply.write(initial_supply * DECIMALS);
-    self.liquidity_pool.write(initial_deposit);
-    self.strk_contract.write(strk_contract);
-    self.marketplace_fee_address.write(marketplace_fee_address);
-    self.erc20.mint(owner, initial_supply * DECIMALS); // Mint initial to owner or liquidity
+        // Convert felt252 to ByteArray properly (avoiding format! issues)
+        let name_bytes = felt252_to_byte_array(name);
+        let symbol_bytes = felt252_to_byte_array(symbol);
+
+        // Initialize ERC20 with ByteArray instead of format!
+        self.erc20.initializer(name_bytes, symbol_bytes);
+        self.ownable.initializer(owner);
+        self.curve_factor.write(curve_factor);
+        self.total_supply.write(initial_supply * DECIMALS);
+        self.liquidity_pool.write(initial_deposit);
+        self.strk_contract.write(strk_contract);
+        self.marketplace_fee_address.write(marketplace_fee_address);
+        self.erc20.mint(owner, initial_supply * DECIMALS); // Mint initial to owner or liquidity
 
         // Initialize tracking
-    if initial_supply > 0 {
-        self.holders.write(owner, true);
-        self.holder_count.write(1);
-    }
-    self.buyer_count.write(0);
-    self.seller_count.write(0);
+        if initial_supply > 0 {
+            self.holders.write(owner, true);
+            self.holder_count.write(1);
+        }
+        self.buyer_count.write(0);
+        self.seller_count.write(0);
     }
 
     #[abi(embed_v0)]
@@ -152,13 +151,22 @@
             let caller = get_caller_address();
             let contract_address = get_contract_address();
 
+            // Scale amount_in to wei units
+            let scaled_in = amount_in * DECIMALS;
+
             // Calculate 2% marketplace fee
-            let fee_amount = amount_in * 2 / 100;
-            let net_amount = amount_in - fee_amount;
+            let fee_amount = scaled_in * 2 / 100;
+            assert(scaled_in >= fee_amount, 'Fee exceeds deposit');
+            let net_amount = scaled_in - fee_amount;
 
             // Transfer STRK from caller to contract
             let strk_dispatcher = IERC20Dispatcher { contract_address: self.strk_contract.read() };
-            let transfer_success = strk_dispatcher.transfer_from(caller, contract_address, amount_in);
+
+            // Check allowance only (balance check removed - transfer_from handles it)
+            let allowance = strk_dispatcher.allowance(caller, contract_address);
+            assert(allowance >= scaled_in, 'Insufficient STRK allowance');
+
+            let transfer_success = strk_dispatcher.transfer_from(caller, contract_address, scaled_in);
             assert(transfer_success, 'STRK transfer failed');
 
             // Transfer fee to marketplace
@@ -190,17 +198,21 @@
 
         fn sell_tokens(ref self: ContractState, tokens_in: u256) {
             assert(tokens_in > 0, 'Tokens must be positive');
-            assert(tokens_in <= self.total_supply.read(), 'Total supply exceeded');
+            assert(tokens_in >= 1, 'Minimum sell 1 token');
             let caller = get_caller_address();
+            let contract_address = get_contract_address();
             let price = self.get_current_price();
 
-            let tokens = tokens_in / DECIMALS;
-            if tokens != 0 {
-            let max_price = u256 { low: 0xFFFFFFFF, high: 0xFFFFFFFF } / tokens; // Approximate max
-            assert(price <= max_price, 'Price overflow');
+            // Scale tokens_in to wei internally
+            let scaled_tokens_in = tokens_in * DECIMALS;
+            assert(scaled_tokens_in <= self.total_supply.read(), 'Total supply exceeded');
+
+            if tokens_in != 0 {
+                let max_price = u256 { low: 0xFFFFFFFF, high: 0xFFFFFFFF } / tokens_in; // Approximate max
+                assert(price <= max_price, 'Price overflow');
             }
 
-            let gross_amount = tokens * price;
+            let gross_amount = tokens_in * price;
             assert(gross_amount > 0, 'Insufficient output');
             assert(gross_amount <= self.liquidity_pool.read(), 'Insufficient liquidity');
 
@@ -208,8 +220,15 @@
             let fee_amount = gross_amount * 2 / 100;
             let net_amount = gross_amount - fee_amount;
 
-            self.erc20.burn(caller, tokens_in);
-            self.total_supply.write(self.total_supply.read() - tokens_in);
+            // Check allowance and transfer meme tokens to contract before burning
+            let allowance = self.erc20.allowance(caller, contract_address);
+            assert(allowance >= scaled_tokens_in, 'Insufficient allowance');
+
+            let transfer_success = self.erc20.transfer_from(caller, contract_address, scaled_tokens_in);
+            assert(transfer_success, 'Meme token transfer failed');
+
+            self.erc20.burn(contract_address, scaled_tokens_in);
+            self.total_supply.write(self.total_supply.read() - scaled_tokens_in);
             self.liquidity_pool.write(self.liquidity_pool.read() - gross_amount);
 
             // Transfer STRK to seller
@@ -274,6 +293,5 @@
         fn is_seller(self: @ContractState, address: ContractAddress) -> bool {
             self.sellers.read(address)
         }
-    
     }
 }
